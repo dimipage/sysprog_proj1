@@ -22,7 +22,7 @@ namespace sysprog_proj1.Services
                     return false;
 
                 _requests.Enqueue(req);
-                Monitor.Pulse(_lock); // budi tacno jednu worker nit koja ceka
+                Monitor.Pulse(_lock);
                 return true;
             }
         }
@@ -32,7 +32,7 @@ namespace sysprog_proj1.Services
             lock (_lock)
             {
                 while (_requests.Count == 0 && _active)
-                    Monitor.Wait(_lock); // oslobadja lock i ceka na Pulse
+                    Monitor.Wait(_lock);
 
                 if (!_active && _requests.Count == 0)
                     return null;
