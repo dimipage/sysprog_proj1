@@ -58,8 +58,6 @@ namespace sysprog_proj1.Services
 
             while (true)
             {
-                // blokira dok nema zahteva 
-                // null = signal za gašenje
                 SearchRequest? req = _queue.Dequeue();
                 if (req == null)
                     break;
