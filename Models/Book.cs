@@ -7,14 +7,12 @@ namespace sysprog_proj1.Models
         [JsonProperty("title")]
         public string? Title { get; set; }
 
-        // Polje moze da nedostaje u API odgovoru, mora nullable
         [JsonProperty("author_name")]
         public List<string>? AuthorName { get; set; }
 
         [JsonProperty("first_publish_year")]
         public int? FirstPublishYear { get; set; }
 
-        // ovaj property mozda ne treba
         [JsonProperty("key")]
         public string? Key { get; set; }
 

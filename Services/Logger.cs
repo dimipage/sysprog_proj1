@@ -6,7 +6,11 @@ namespace sysprog_proj1.Services
 
         public void Log(string level, string message)
         {
-            string line = $"[{DateTime.Now:HH:mm:ss.fff}] [{level}] [nit-{Thread.CurrentThread.ManagedThreadId}] {message}";
+            string context = Task.CurrentId.HasValue
+                ? $"task-{Task.CurrentId,3}"
+                : $"nit -{Thread.CurrentThread.ManagedThreadId,3}";
+
+            string line = $"[{DateTime.Now:HH:mm:ss.fff}] [{level}] [{context}] {message}";
             lock (_consoleLock)
             {
                 Console.WriteLine(line);

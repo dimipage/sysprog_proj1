@@ -7,13 +7,12 @@ namespace sysprog_proj1.Services
     {
         private class Entry
         {
-            public List<Book> Books   { get; set; } = new();
-            public DateTime   Expiry  { get; set; }
-            public bool       Fetching { get; set; }
+            public List<Book> Books  { get; set; } = new();
+            public DateTime   Expiry { get; set; }
+            public bool       IsExpired => DateTime.UtcNow >= Expiry;
         }
 
-        private readonly ConcurrentDictionary<string, Entry> _store = new();
-        private readonly object   _pulseLock = new object(); 
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<Entry>> _store = new();
         private readonly TimeSpan _ttl;
         private readonly Logger   _log;
 
@@ -22,77 +21,83 @@ namespace sysprog_proj1.Services
             _ttl = ttl;
             _log = log;
         }
-        public List<Book> GetOrFetch(string key, Func<List<Book>> fetch)
+
+        public Task<List<Book>> GetOrFetchAsync(string key, Func<Task<List<Book>>> fetch)
         {
             while (true)
             {
-                if (_store.TryGetValue(key, out Entry? e))
+                if (_store.TryGetValue(key, out TaskCompletionSource<Entry>? existingTcs))
                 {
-                    if (e.Fetching)
+                    return existingTcs.Task.ContinueWith(entryTask =>
                     {
-                        lock (_pulseLock)
-                        { //dupla provera zbog lost wakeup
-                            if (_store.TryGetValue(key, out e) && e.Fetching)
-                                Monitor.Wait(_pulseLock);
+                        if (entryTask.IsFaulted)
+                            return Task.FromException<List<Book>>(
+                                entryTask.Exception!.GetBaseException());
+
+                        if (!entryTask.Result.IsExpired)
+                        {
+                            _log.Info($"Kes HIT [{key}]");
+                            return Task.FromResult(entryTask.Result.Books);
                         }
-                        continue;
-                    }
 
-                    if (DateTime.UtcNow < e.Expiry)
-                    {
-                        _log.Info($"Kes HIT [{key}]");
-                        return e.Books;
-                    }
+                        _store.TryRemove(key, out _);
+                        return GetOrFetchAsync(key, fetch);
 
-                    _store.TryRemove(key, out _);
+                    }, TaskScheduler.Default).Unwrap();
                 }
 
-                var placeholder = new Entry { Fetching = true };
-                if (_store.TryAdd(key, placeholder))
-                    break;
-            }
+                var tcs = new TaskCompletionSource<Entry>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
 
-            try
-            {
+                if (!_store.TryAdd(key, tcs))
+                    continue;
+
                 _log.Info($"Kes MISS [{key}] - pozivam API...");
-                List<Book> result = fetch();
 
-                // zamenjujemo placeholder
-                _store[key] = new Entry
+                fetch().ContinueWith(fetchTask =>
                 {
-                    Books  = result,
-                    Expiry = DateTime.UtcNow + _ttl
-                };
+                    if (fetchTask.IsFaulted)
+                    {
+                        _store.TryRemove(key, out _);
+                        tcs.SetException(fetchTask.Exception!.GetBaseException());
+                    }
+                    else
+                    {
+                        var entry = new Entry
+                        {
+                            Books  = fetchTask.Result,
+                            Expiry = DateTime.UtcNow + _ttl
+                        };
+                        _log.Info($"Kes SET [{key}] ({fetchTask.Result.Count} knjiga, TTL={_ttl.TotalMinutes}min)");
+                        tcs.SetResult(entry);
+                    }
+                }, TaskScheduler.Default);
 
-                lock (_pulseLock)
-                    Monitor.PulseAll(_pulseLock);
-
-                _log.Info($"Kes SET [{key}] ({result.Count} knjiga, TTL={_ttl.TotalMinutes}min)");
-                return result;
-            }
-            catch
-            {
-                _store.TryRemove(key, out _);
-                lock (_pulseLock)
-                    Monitor.PulseAll(_pulseLock);
-                throw;
+                return tcs.Task.ContinueWith(t =>
+                {
+                    if (t.IsFaulted) throw t.Exception!.GetBaseException();
+                    return t.Result.Books;
+                }, TaskScheduler.Default);
             }
         }
+
         public void EvictExpired()
         {
             int count = 0;
             foreach (var kv in _store)
             {
-                if (!kv.Value.Fetching && DateTime.UtcNow >= kv.Value.Expiry)
+                TaskCompletionSource<Entry> tcs = kv.Value;
+                if (tcs.Task.IsCompletedSuccessfully && tcs.Task.Result.IsExpired)
                 {
-                    _store.TryRemove(new KeyValuePair<string, Entry>(kv.Key, kv.Value));
-                    count++;
+                    if (_store.TryRemove(new KeyValuePair<string, TaskCompletionSource<Entry>>(kv.Key, tcs)))
+                        count++;
                 }
             }
             if (count > 0)
                 _log.Info($"Kes: uklonjeno {count} isteklih unosa");
         }
-        
-        public int Size => _store.Count;
+
+        public int Size => _store.Count(kv =>
+            kv.Value.Task.IsCompletedSuccessfully && !kv.Value.Task.Result.IsExpired);
     }
 }

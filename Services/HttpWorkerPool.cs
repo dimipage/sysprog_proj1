@@ -8,14 +8,15 @@ namespace sysprog_proj1.Services
     public class HttpWorkerPool
     {
         private readonly RequestQueue _queue;
-        private readonly BookCache _cache;
-        private readonly Logger _log;
-        private readonly List<Thread> _workers = new List<Thread>();
+        private readonly BookCache    _cache;
+        private readonly Logger       _log;
+        private readonly List<Thread> _workers          = new List<Thread>();
+        private readonly TimeSpan     _evictionInterval = TimeSpan.FromMinutes(5);
 
         private static readonly HttpClient _http = new HttpClient
         {
             Timeout = TimeSpan.FromSeconds(15),
-            DefaultRequestHeaders = { { "User-Agent", "BookSearchServer/1.0" } }
+            DefaultRequestHeaders = { { "User-Agent", "BookSearchServer/2.0" } }
         };
 
         public static int TotalProcessed;
@@ -41,15 +42,9 @@ namespace sysprog_proj1.Services
                 _workers.Add(t);
             }
 
-            new Thread(() => {
-                while (true)
-                {
-                    Thread.Sleep(TimeSpan.FromMinutes(5));
-                    _cache.EvictExpired();
-                }
-            }) { IsBackground = true, Name = "CacheEvictor" }.Start();
+            ScheduleEviction();
 
-            _log.Info($"Pokrenuto {workerCount} worker niti");
+            _log.Info($"Pokrenuto {workerCount} radničkih niti");
         }
 
         void WorkLoop()
@@ -59,41 +54,44 @@ namespace sysprog_proj1.Services
             while (true)
             {
                 SearchRequest? req = _queue.Dequeue();
-                if (req == null)
-                    break;
+                if (req == null) break;
 
-                _log.Info($"{Thread.CurrentThread.Name} obradjuje: {req.CacheKey}");
-                Process(req);
+                ProcessAsync(req).GetAwaiter().GetResult();
             }
 
-            _log.Info($"{Thread.CurrentThread.Name} zavrsen");
+            _log.Info($"{Thread.CurrentThread.Name} završen");
         }
 
-        void Process(SearchRequest req)
+        private Task ProcessAsync(SearchRequest req)
         {
-            try
-            {
-                List<Book> books = _cache.GetOrFetch(req.CacheKey, () => CallApi(req));
-                Interlocked.Increment(ref TotalProcessed);
-                SendHtml(req.ClientContext.Response, 200, BuildHtml(books, req));
-            }
-            catch (HttpRequestException ex)
-            {
-                _log.Error($"API greska: {ex.Message}");
-                Interlocked.Increment(ref TotalErrors);
-                SendHtml(req.ClientContext.Response, 502,
-                    $"<h2>Greska: Open Library API nije dostupan.</h2><a href='/'>Nazad</a>");
-            }
-            catch (Exception ex)
-            {
-                _log.Error($"Interna greska: {ex.Message}");
-                Interlocked.Increment(ref TotalErrors);
-                SendHtml(req.ClientContext.Response, 500,
-                    $"<h2>Interna greska servera.</h2><a href='/'>Nazad</a>");
-            }
+            _log.Info($"{Thread.CurrentThread.Name} obradjuje: {req.CacheKey}");
+
+            return _cache.GetOrFetchAsync(req.CacheKey, () => CallApiAsync(req))
+                .ContinueWith(booksTask =>
+                {
+                    Interlocked.Increment(ref TotalProcessed);
+
+                    if (booksTask.IsFaulted)
+                    {
+                        Exception ex = booksTask.Exception!.GetBaseException();
+                        _log.Error($"Greška pri obradi [{req.CacheKey}]: {ex.Message}");
+                        Interlocked.Increment(ref TotalErrors);
+
+                        bool isApiError = ex is HttpRequestException;
+                        SendHtml(req.ClientContext.Response,
+                            isApiError ? 502 : 500,
+                            isApiError
+                                ? "<h2>Greška: Open Library API nije dostupan.</h2><a href='/'>Nazad</a>"
+                                : "<h2>Interna greška servera.</h2><a href='/'>Nazad</a>");
+                    }
+                    else
+                    {
+                        SendHtml(req.ClientContext.Response, 200, BuildHtml(booksTask.Result, req));
+                    }
+                }, TaskScheduler.Default);
         }
 
-        List<Book> CallApi(SearchRequest req)
+        private Task<List<Book>> CallApiAsync(SearchRequest req)
         {
             var parts = new List<string>();
             if (!string.IsNullOrWhiteSpace(req.Author))  parts.Add("author="  + Uri.EscapeDataString(req.Author));
@@ -105,12 +103,28 @@ namespace sysprog_proj1.Services
             string url = "https://openlibrary.org/search.json?" + string.Join("&", parts);
             _log.Info($"API poziv: {url}");
 
-            using var response = _http.Send(new HttpRequestMessage(HttpMethod.Get, url));
-            response.EnsureSuccessStatusCode();
+            return _http.GetAsync(url)
+                .ContinueWith(responseTask =>
+                {
+                    responseTask.Result.EnsureSuccessStatusCode();
+                    return responseTask.Result.Content.ReadAsStringAsync();
+                }, TaskScheduler.Default)
+                .Unwrap()
+                .ContinueWith(bodyTask =>
+                {
+                    ApiResponse? parsed = JsonConvert.DeserializeObject<ApiResponse>(bodyTask.Result);
+                    return parsed?.Books ?? new List<Book>();
+                }, TaskScheduler.Default);
+        }
 
-            string body = response.Content.ReadAsStringAsync().Result;
-            ApiResponse? parsed = JsonConvert.DeserializeObject<ApiResponse>(body);
-            return parsed?.Books ?? new List<Book>();
+        private void ScheduleEviction()
+        {
+            Task.Delay(_evictionInterval)
+                .ContinueWith(_ =>
+                {
+                    _cache.EvictExpired();
+                }, TaskScheduler.Default)
+                .ContinueWith(_ => ScheduleEviction(), TaskScheduler.Default);
         }
 
         public void WaitForShutdown()
@@ -132,11 +146,11 @@ namespace sysprog_proj1.Services
 
             if (books.Count == 0)
             {
-                sb.AppendLine("<p class='empty'>Nisu pronadjene knjige za zadate parametre.</p>");
+                sb.AppendLine("<p class='empty'>Nisu pronađene knjige za zadate parametre.</p>");
             }
             else
             {
-                sb.AppendLine($"<p>Pronadjeno <strong>{books.Count}</strong> knjiga:</p>");
+                sb.AppendLine($"<p>Pronađeno <strong>{books.Count}</strong> knjiga:</p>");
                 sb.AppendLine("<table>");
                 sb.AppendLine("<tr><th>#</th><th>Naslov</th><th>Autor</th><th>Godina</th></tr>");
                 for (int i = 0; i < books.Count; i++)
@@ -182,12 +196,9 @@ a     { color: #0066cc; }
                 resp.OutputStream.Write(data);
                 resp.OutputStream.Close();
             }
-            catch (IOException) {  }
-            catch (HttpListenerException) {  }
-            catch (Exception ex)
-            {
-                _log.Error($"Greška pri slanju odgovora: {ex.Message}");
-            }
+            catch (IOException) { }
+            catch (HttpListenerException) { }
+            catch (Exception ex) { _log.Error($"Greška pri slanju odgovora: {ex.Message}"); }
         }
     }
 }

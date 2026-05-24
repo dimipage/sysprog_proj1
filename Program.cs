@@ -21,7 +21,7 @@ namespace sysprog_proj1
 
         static int _stopping = 0;
 
-        static void Main(string[] args)
+        static async Task Main(string[] args)
         {
             _pool.Start(WorkerCount);
 
@@ -32,31 +32,30 @@ namespace sysprog_proj1
             _log.Info($"Primer: {ServerUrl}search?author=tolkien&sort=new");
             _log.Info("Komande: 'stats' - statistika | 'quit' - gasenje");
 
-            // Ctrl+C gracefull shutdown
             Console.CancelKeyPress += (_, e) => { e.Cancel = true; Shutdown(); };
-
             new Thread(ConsoleLoop) { IsBackground = true }.Start();
 
             while (_server.IsListening)
             {
                 try
                 {
-                    HttpListenerContext ctx = _server.GetContext();
+                    HttpListenerContext ctx = await _server.GetContextAsync();
                     _log.Info($"Primljen zahtev: {ctx.Request.HttpMethod} {ctx.Request.Url?.PathAndQuery}");
                     RouteRequest(ctx);
                 }
-                catch (HttpListenerException) { break; }
-                catch (Exception ex)          { _log.Error($"Greska pri prijemu: {ex.Message}"); }
+                catch (HttpListenerException)   { break; }
+                catch (ObjectDisposedException) { break; }
+                catch (Exception ex)            { _log.Error($"Greška pri prijemu: {ex.Message}"); }
             }
 
-            _log.Info("Server ugasen.");
+            _log.Info("Server ugašen.");
         }
 
         static void RouteRequest(HttpListenerContext ctx)
         {
             if (ctx.Request.HttpMethod != "GET")
             {
-                _pool.SendHtml(ctx.Response, 405, "<h2>405 - Samo GET metoda je podrzana.</h2>");
+                _pool.SendHtml(ctx.Response, 405, "<h2>405 - Samo GET metoda je podržana.</h2>");
                 return;
             }
 
@@ -74,14 +73,14 @@ namespace sysprog_proj1
 
                 default:
                     _pool.SendHtml(ctx.Response, 404,
-                        "<h2>404 - Stranica nije pronadjena.</h2><a href='/'>Pocetna</a>");
+                        "<h2>404 - Stranica nije pronađena.</h2><a href='/'>Početna</a>");
                     break;
             }
         }
 
         static void EnqueueOrReject(HttpListenerContext ctx)
         {
-            var qs      = ctx.Request.QueryString;
+            var    qs      = ctx.Request.QueryString;
             string author  = qs["author"]  ?? "";
             string title   = qs["title"]   ?? "";
             string subject = qs["subject"] ?? "";
@@ -98,10 +97,10 @@ namespace sysprog_proj1
 
             var req = new SearchRequest
             {
-                Author  = author,
-                Title   = title,
-                Subject = subject,
-                Sort    = sort,
+                Author        = author,
+                Title         = title,
+                Subject       = subject,
+                Sort          = sort,
                 ClientContext = ctx
             };
 
@@ -110,7 +109,7 @@ namespace sysprog_proj1
             {
                 _log.Warn("Red je pun, zahtev odbijen (503)");
                 _pool.SendHtml(ctx.Response, 503,
-                    "<h2>503 - Server je preopterecen. Pokusajte ponovo.</h2>");
+                    "<h2>503 - Server je preopterećen. Pokušajte ponovo.</h2>");
             }
         }
 
@@ -125,9 +124,9 @@ namespace sysprog_proj1
                         Shutdown();
                         return;
                     case "stats":
-                        _log.Info($"Obradeno: {HttpWorkerPool.TotalProcessed} | " +
-                                  $"Gresaka: {HttpWorkerPool.TotalErrors} | " +
-                                  $"U kesu: {_cache.Size} | " +
+                        _log.Info($"Obrađeno: {HttpWorkerPool.TotalProcessed} | " +
+                                  $"Grešaka: {HttpWorkerPool.TotalErrors} | " +
+                                  $"U kešu: {_cache.Size} | " +
                                   $"U redu: {_queue.Count}");
                         break;
                     default:
@@ -140,7 +139,7 @@ namespace sysprog_proj1
         static void Shutdown()
         {
             if (Interlocked.Exchange(ref _stopping, 1) != 0) return;
-            _log.Info("Gasenje servera...");
+            _log.Info("Gašenje servera...");
             _server.Stop();
             _queue.Shutdown();
             _pool.WaitForShutdown();
@@ -181,7 +180,7 @@ namespace sysprog_proj1
       <option value='rating'>Ocena</option>
     </select>
     <br>
-    <button type='submit'>Pretrazi</button>
+    <button type='submit'>Pretraži</button>
   </form>
 </body>
 </html>";
